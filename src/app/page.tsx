@@ -1,12 +1,14 @@
+import Image from "next/image";
+
 export default function Home() {
-  const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER?.replace("whatsapp:", "") ?? "+14155238886";
-  const sandboxJoinMsg = "join <YOUR_SANDBOX_CODE>";
+  const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER?.replace("whatsapp:", "") ?? "+17372508034";
+  const sandboxJoinMsg = "join twilio-trial";
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 font-sans text-white">
       {/* Header */}
       <header className="border-b border-zinc-800 px-8 py-4 flex items-center gap-3">
-        <span className="text-2xl">⚖️</span>
+        <Image src="/Arbiter-logo.png" alt="Arbiter Logo" width={28} height={28} className="object-contain" />
         <h1 className="text-xl font-bold tracking-tight">Arbiter</h1>
         <span className="ml-auto text-xs text-zinc-500 font-mono">Razorpay Buildathon · Track 05</span>
       </header>
@@ -72,7 +74,10 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="border-t border-zinc-800 px-8 py-4 text-center text-xs text-zinc-600">
-        Built for Razorpay Buildathon · Sept 2026 · Powered by Twilio, Razorpay, Supabase, Gemini
+        <p>Built for Razorpay Buildathon · Sept 2026 · Powered by Twilio, Razorpay, Supabase, Gemini</p>
+        <p className="mt-2">
+          Designed & Developed By <a href="https://itsashutoshpathak.vercel.app/" target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:underline">Ashutosh Pathak</a>
+        </p>
       </footer>
     </div>
   );
