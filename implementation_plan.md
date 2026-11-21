@@ -1,5 +1,5 @@
 # Arbiter — Implementation Plan
-### Razorpay Buildathon | Track 05: Open Track | Solo Build | Deadline: Sept 5
+### WhatsApp-Native AI Escrow & Dispute Resolution System
 
 Arbiter is a WhatsApp-native, AI-powered escrow and dispute resolution system for India's gig economy. A freelancer and client agree on work via WhatsApp, money is held in Razorpay escrow, work is submitted and tracked inside the bot, and if a dispute arises — an AI judge reads the evidence log and splits the payment automatically. No lawyers. No ghosting. No lost money.
 
@@ -678,7 +678,7 @@ await razorpay.payments.refund(contract.payment_id, {
 ### Known Limitations (Mention in Submission — Shows Depth)
 
 > [!NOTE]
-> These are intentionally out of scope for the hackathon but demonstrate product thinking when mentioned to judges.
+> These are intentionally out of scope for the product but demonstrate product thinking when mentioned to judges.
 > - **Collusion detection** — freelancer controlling client's phone
 > - **Chargeback protection** — client disputing via their bank after payment
 > - **KYC/AML** — bot used for money laundering via fake contracts
@@ -701,4 +701,4 @@ await razorpay.payments.refund(contract.payment_id, {
 > **File forwarding via Twilio:** When you receive a media file on Twilio, you get a `MediaUrl`. Download it to Supabase Storage immediately — Twilio deletes media URLs after a few days. Send the Supabase URL to the client, not the Twilio URL.
 
 > [!NOTE]
-> **LLM cost:** Gemini 1.5 Flash is free up to 15 requests/minute. For a hackathon demo this is more than enough.
+> **LLM cost:** Gemini 1.5 Flash is free up to 15 requests/minute. For a product demo this is more than enough.
