@@ -2,8 +2,6 @@
 
 **The WhatsApp-native, AI-powered escrow and dispute resolution system for India's gig economy.**
 
-Built for the **Razorpay Buildathon (Track 05: Open Track)**.
-
 > 🌐 **Live Demo:** [arbiter-omega.vercel.app](https://arbiter-omega.vercel.app)
 > 💬 **Try it:** Send `#arbiter` to [+91 9871852159 on WhatsApp](https://wa.me/919871852159?text=%23arbiter)
 

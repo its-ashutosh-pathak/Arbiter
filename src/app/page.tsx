@@ -10,7 +10,6 @@ export default function Home() {
       <header className="border-b border-zinc-800 px-8 py-4 flex items-center gap-3">
         <Image src="/Arbiter-logo.png" alt="Arbiter Logo" width={28} height={28} className="object-contain" />
         <h1 className="text-xl font-bold tracking-tight">Arbiter</h1>
-        <span className="ml-auto text-xs text-zinc-500 font-mono">Razorpay Buildathon · Track 05</span>
       </header>
 
       {/* Hero */}
@@ -74,7 +73,7 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="border-t border-zinc-800 px-8 py-4 text-center text-xs text-zinc-600">
-        <p>Built for Razorpay Buildathon · Nov 2026 · Powered by Green API, Razorpay, Supabase, Gemini</p>
+        <p>Arbiter · Escrow & AI Dispute Resolution for WhatsApp · Powered by Green API, Razorpay, Supabase, Gemini</p>
         <p className="mt-2">
           Designed & Developed By <a href="https://itsashutoshpathak.vercel.app/" target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:underline">Ashutosh Pathak</a>
         </p>
