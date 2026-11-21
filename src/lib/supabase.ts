@@ -1,6 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+let rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+// Clean URL: remove trailing slashes or /rest/v1/ suffix if present
+rawUrl = rawUrl.replace(/\/+$/, '').replace(/\/rest\/v1$/i, '');
+const supabaseUrl = rawUrl;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
 if (!supabaseUrl || !supabaseKey) {
