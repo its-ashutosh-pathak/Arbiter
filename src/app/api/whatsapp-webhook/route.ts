@@ -37,7 +37,7 @@ async function executePayoutToFreelancer(contract: any, freelancerAmount: number
     await razorpayAny.payouts.create({
       account_number: process.env.RAZORPAY_ACCOUNT_NUMBER || '',
       fund_account_id: fundAccount.id,
-      amount: freelancerAmount * 100, // paise
+      amount: freelancerAmount * 100,
       currency: 'INR',
       mode: 'UPI',
       purpose: 'freelancer_payment',
@@ -156,7 +156,6 @@ async function runDisputeAndNotify(contract: any) {
 
     const ruling = await adjudicateDispute(contract.id);
 
-    // Log AI ruling as event
     await supabase.from('events').insert({
       contract_id: contract.id,
       actor: 'ai',
@@ -164,7 +163,6 @@ async function runDisputeAndNotify(contract: any) {
       content: JSON.stringify(ruling)
     });
 
-    // Execute the financial split
     await executeSplitPayout(contract, ruling.freelancer_amount);
 
     const rulingMsg =
@@ -183,13 +181,34 @@ async function runDisputeAndNotify(contract: any) {
 
   } catch (e) {
     console.error('Dispute adjudication error:', e);
-    // Fallback: 50/50 split
     const half = Math.floor(contract.amount / 2);
     await executeSplitPayout(contract, half);
     const fallbackMsg = `⚠️ The AI Judge encountered an error. A 50/50 split has been applied as a neutral fallback for contract *#${contract.id}*.`;
     await sendWhatsAppMessage(contract.freelancer_phone, fallbackMsg);
     await sendWhatsAppMessage(contract.client_phone, fallbackMsg);
   }
+}
+
+// =========================================================
+// HELPER: Send contract card to client for review
+// =========================================================
+async function sendContractCardToClient(contract: any, freelancerName: string) {
+  const clientName = contract.client_name || 'Client';
+  const contractCard =
+    `📋 *ARB CONTRACT #${contract.id}*\n` +
+    `─────────────────────────\n` +
+    `*Work:* ${contract.description}\n` +
+    `*Revisions:* ${contract.revisions_allowed}\n` +
+    `*Payment:* ₹${contract.amount.toLocaleString('en-IN')} (held in escrow until you approve)\n` +
+    `─────────────────────────\n` +
+    `*Freelancer:* ${freelancerName}\n` +
+    `*Freelancer Phone:* +${contract.freelancer_phone}\n` +
+    `*Client:* ${clientName}\n` +
+    `─────────────────────────\n` +
+    `This contract is binding once payment is made.\n\n` +
+    `Reply *AGREE* to pay and start, or *EDIT* to request changes.`;
+
+  await sendWhatsAppMessage(contract.client_phone, contractCard);
 }
 
 // =========================================================
@@ -208,7 +227,6 @@ export async function POST(req: Request) {
       const data = JSON.parse(rawBody);
       const typeWebhook = data.typeWebhook;
 
-      // Only handle incoming messages
       if (typeWebhook !== 'incomingMessageReceived') {
         return NextResponse.json({ success: true, ignored: true });
       }
@@ -216,7 +234,6 @@ export async function POST(req: Request) {
       const senderData = data.senderData || {};
       const messageData = data.messageData || {};
 
-      // sender e.g. "919876543210@c.us"
       const sender = senderData.chatId || senderData.sender || '';
       phone = sender.replace('@c.us', '').replace('whatsapp:', '');
       messageSid = data.idMessage || '';
@@ -230,7 +247,6 @@ export async function POST(req: Request) {
         mediaUrl = messageData.fileMessageData?.downloadUrl || null;
       }
     } else {
-      // Fallback for form-encoded (Twilio format)
       const params = new URLSearchParams(rawBody);
       const from = params.get('From') || '';
       body = params.get('Body') || '';
@@ -243,14 +259,12 @@ export async function POST(req: Request) {
 
     // =========================================================
     // #ARBITER TRIGGER FILTER
-    // Check if user is already in an ongoing multi-step flow or contract,
-    // OR if message starts with or contains #arbiter
     // =========================================================
     const cleanBody = body.trim();
     const hasTrigger = cleanBody.toLowerCase().includes('#arbiter');
 
-    // Check if user exists in database
-    const { data: user, error: userError } = await supabase
+    // Check if user exists
+    let { data: user, error: userError } = await supabase
       .from('users')
       .select('*')
       .eq('phone', phone)
@@ -258,7 +272,7 @@ export async function POST(req: Request) {
 
     const isOngoingFlow = user && user.state && user.state !== 'IDLE';
 
-    // Check if there is an active pending or in-progress contract involving this phone
+    // Check for active contracts involving this phone
     const { data: hasActiveContract } = await supabase
       .from('contracts')
       .select('id')
@@ -268,20 +282,18 @@ export async function POST(req: Request) {
 
     const isInActiveContract = hasActiveContract && hasActiveContract.length > 0;
 
-    // IF not in active interaction AND message does NOT contain #arbiter, SILENTLY IGNORE
-    // (Protects personal messages from friends/family!)
     if (!hasTrigger && !isOngoingFlow && !isInActiveContract) {
       console.log(`[IGNORE] Personal message without #arbiter trigger from ${phone}`);
       return NextResponse.json({ success: true, ignored: true });
     }
 
-    // Strip #arbiter trigger word from the command if present
+    // Strip #arbiter trigger
     let processedBody = cleanBody.replace(/#arbiter/gi, '').trim();
     if (!processedBody && hasTrigger) {
-      processedBody = 'MENU'; // Typing just "#arbiter" opens menu
+      processedBody = 'MENU';
     }
 
-    // --- IDEMPOTENCY: Skip duplicate deliveries ---
+    // --- IDEMPOTENCY ---
     if (messageSid) {
       const { data: existingMsg } = await supabase
         .from('processed_messages')
@@ -297,15 +309,40 @@ export async function POST(req: Request) {
       await supabase.from('processed_messages').insert({ message_sid: messageSid });
     }
 
-    // --- ONBOARDING: NEW USER ---
+    // =========================================================
+    // FIX #4: NEW USER WITH PENDING CONTRACT → auto-register
+    // If a client is new but already has a contract waiting, register
+    // them silently and proceed to the contract flow instead of
+    // forcing onboarding (which would swallow the AGREE command).
+    // =========================================================
     const isNewUser = !user && (userError as any)?.code === 'PGRST116';
+
     if (isNewUser) {
-      await supabase.from('users').insert({ phone, state: 'SETUP_NAME' });
-      await sendWhatsAppMessage(
-        phone,
-        `👋 Welcome to *Arbiter* ⚖️\n\nThe safest way to handle freelance contracts on WhatsApp.\n\nTo get started, what is your full name?`
-      );
-      return NextResponse.json({ success: true });
+      // Check if this phone is a client on a pending contract
+      const { data: pendingForNewClient } = await supabase
+        .from('contracts')
+        .select('id, client_name')
+        .eq('client_phone', phone)
+        .eq('status', 'PENDING_AGREEMENT')
+        .limit(1);
+
+      if (pendingForNewClient && pendingForNewClient.length > 0) {
+        // Auto-register client with name from contract (freelancer already provided it)
+        const clientName = pendingForNewClient[0].client_name || 'Client';
+        await supabase.from('users').insert({ phone, name: clientName, state: 'IDLE' });
+        // Re-fetch user so the rest of the handler works
+        const { data: refetched } = await supabase.from('users').select('*').eq('phone', phone).single();
+        user = refetched;
+        userError = null;
+      } else {
+        // FIX #1: Normal new user onboarding (freelancer first time)
+        await supabase.from('users').insert({ phone, state: 'SETUP_NAME' });
+        await sendWhatsAppMessage(
+          phone,
+          `👋 *Welcome to Arbiter* ⚖️\n\nThe safest way to handle freelance contracts on WhatsApp.\n\nTo get started, what is your full name?`
+        );
+        return NextResponse.json({ success: true });
+      }
     }
 
     if (!user) {
@@ -316,7 +353,7 @@ export async function POST(req: Request) {
     const command = processedBody.toUpperCase();
 
     // =========================================================
-    // GLOBAL COMMANDS (always available regardless of state)
+    // GLOBAL COMMANDS
     // =========================================================
     if (command === 'RESET') {
       await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
@@ -392,7 +429,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ success: true });
     }
 
-    // STATE: AWAITING_CONTRACT_EDIT — client requesting edits to a pending contract
+    // =========================================================
+    // FIX #3: AWAITING_CONTRACT_EDIT → collect client feedback,
+    // then put FREELANCER into edit wizard for the same contract
+    // =========================================================
     if (user.state === 'AWAITING_CONTRACT_EDIT') {
       const stateData = user.state_data || {};
       const { data: contract } = await supabase
@@ -407,22 +447,162 @@ export async function POST(req: Request) {
       }
 
       const editText = processedBody;
+
+      // Send feedback to freelancer and put them in EDITING mode
       await sendWhatsAppMessage(
         contract.freelancer_phone,
         `📝 *CONTRACT EDIT REQUEST — #${contract.id}*\n` +
         `Client requested the following changes before agreeing:\n\n"${editText}"\n\n` +
-        `Please discuss with the client and create a new contract if needed.`
+        `─────────────────────────\n` +
+        `Current contract details:\n` +
+        `*Work:* ${contract.description}\n` +
+        `*Amount:* ₹${contract.amount.toLocaleString('en-IN')}\n` +
+        `*Revisions:* ${contract.revisions_allowed}\n` +
+        `─────────────────────────\n` +
+        `What would you like to update?\n\n` +
+        `1️⃣ Description\n` +
+        `2️⃣ Amount\n` +
+        `3️⃣ Revisions\n` +
+        `✅ DONE — re-send updated contract to client`
       );
-      await sendWhatsAppMessage(phone, `✅ Your edit request was sent to the freelancer. They will reply soon.`);
 
+      // Put freelancer into EDITING_CONTRACT state
+      await supabase.from('users').update({
+        state: 'EDITING_CONTRACT',
+        state_data: { contractId: contract.id }
+      }).eq('phone', contract.freelancer_phone);
+
+      await sendWhatsAppMessage(phone, `✅ Your edit request was sent to the freelancer. They will update the contract and re-send it to you.`);
       await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
       return NextResponse.json({ success: true });
     }
 
-    // STATE: DISPUTE_STATEMENT — collecting one party's dispute statement
+    // FIX #3: EDITING_CONTRACT — freelancer picks what to edit
+    if (user.state === 'EDITING_CONTRACT') {
+      const stateData = user.state_data || {};
+      const { data: contract } = await supabase
+        .from('contracts')
+        .select('*')
+        .eq('id', stateData.contractId)
+        .single();
+
+      if (!contract) {
+        await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
+        return NextResponse.json({ success: true });
+      }
+
+      if (command === '1') {
+        await supabase.from('users').update({
+          state: 'EDITING_DESC',
+          state_data: { contractId: contract.id }
+        }).eq('phone', phone);
+        await sendWhatsAppMessage(phone, `📝 Send the updated work description:`);
+      } else if (command === '2') {
+        await supabase.from('users').update({
+          state: 'EDITING_AMOUNT',
+          state_data: { contractId: contract.id }
+        }).eq('phone', phone);
+        await sendWhatsAppMessage(phone, `💰 Send the updated amount (e.g. *8000*, *25k*, *1.5L*):`);
+      } else if (command === '3') {
+        await supabase.from('users').update({
+          state: 'EDITING_REVISIONS',
+          state_data: { contractId: contract.id }
+        }).eq('phone', phone);
+        await sendWhatsAppMessage(phone, `🔄 How many revision rounds? (0-20):`);
+      } else if (command === 'DONE') {
+        // Re-fetch updated contract
+        const { data: updated } = await supabase
+          .from('contracts')
+          .select('*')
+          .eq('id', contract.id)
+          .single();
+
+        if (updated) {
+          const { data: flUser } = await supabase.from('users').select('name').eq('phone', phone).single();
+          await sendContractCardToClient(updated, flUser?.name || 'Freelancer');
+          await sendWhatsAppMessage(phone, `✅ Updated contract *#${contract.id}* has been re-sent to the client for approval.`);
+        }
+        await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
+      } else {
+        await sendWhatsAppMessage(phone,
+          `Reply with a number to edit:\n\n` +
+          `1️⃣ Description\n` +
+          `2️⃣ Amount\n` +
+          `3️⃣ Revisions\n` +
+          `✅ DONE — re-send updated contract to client`
+        );
+      }
+      return NextResponse.json({ success: true });
+    }
+
+    // FIX #3: EDITING_DESC — freelancer enters new description
+    if (user.state === 'EDITING_DESC') {
+      const stateData = user.state_data || {};
+      const desc = processedBody;
+      if (desc.length < 20) {
+        await sendWhatsAppMessage(phone, `⚠️ Description must be at least 20 characters. Please try again.`);
+        return NextResponse.json({ success: true });
+      }
+      await supabase.from('contracts').update({ description: desc }).eq('id', stateData.contractId);
+      await supabase.from('users').update({
+        state: 'EDITING_CONTRACT',
+        state_data: { contractId: stateData.contractId }
+      }).eq('phone', phone);
+      await sendWhatsAppMessage(phone,
+        `✅ Description updated!\n\nWhat else to update?\n\n` +
+        `1️⃣ Description\n2️⃣ Amount\n3️⃣ Revisions\n✅ DONE — re-send to client`
+      );
+      return NextResponse.json({ success: true });
+    }
+
+    // FIX #3: EDITING_AMOUNT — freelancer enters new amount
+    if (user.state === 'EDITING_AMOUNT') {
+      const stateData = user.state_data || {};
+      let amountStr = processedBody.toLowerCase().replace(/,/g, '');
+      if (amountStr.endsWith('k')) amountStr = (parseFloat(amountStr) * 1000).toString();
+      else if (amountStr.endsWith('l')) amountStr = (parseFloat(amountStr) * 100000).toString();
+      const amount = parseInt(amountStr.replace(/[^0-9]/g, ''));
+
+      if (isNaN(amount) || amount < 100) {
+        await sendWhatsAppMessage(phone, `Minimum is ₹100. Please enter a valid amount.`);
+        return NextResponse.json({ success: true });
+      }
+      await supabase.from('contracts').update({ amount }).eq('id', stateData.contractId);
+      await supabase.from('users').update({
+        state: 'EDITING_CONTRACT',
+        state_data: { contractId: stateData.contractId }
+      }).eq('phone', phone);
+      await sendWhatsAppMessage(phone,
+        `✅ Amount updated to ₹${amount.toLocaleString('en-IN')}!\n\nWhat else?\n\n` +
+        `1️⃣ Description\n2️⃣ Amount\n3️⃣ Revisions\n✅ DONE — re-send to client`
+      );
+      return NextResponse.json({ success: true });
+    }
+
+    // FIX #3: EDITING_REVISIONS — freelancer enters new revision count
+    if (user.state === 'EDITING_REVISIONS') {
+      const stateData = user.state_data || {};
+      const revisions = parseInt(processedBody.replace(/[^0-9]/g, ''));
+      if (isNaN(revisions) || revisions < 0 || revisions > 20) {
+        await sendWhatsAppMessage(phone, `Please reply with a number between 0 and 20.`);
+        return NextResponse.json({ success: true });
+      }
+      await supabase.from('contracts').update({ revisions_allowed: revisions }).eq('id', stateData.contractId);
+      await supabase.from('users').update({
+        state: 'EDITING_CONTRACT',
+        state_data: { contractId: stateData.contractId }
+      }).eq('phone', phone);
+      await sendWhatsAppMessage(phone,
+        `✅ Revisions updated to ${revisions}!\n\nWhat else?\n\n` +
+        `1️⃣ Description\n2️⃣ Amount\n3️⃣ Revisions\n✅ DONE — re-send to client`
+      );
+      return NextResponse.json({ success: true });
+    }
+
+    // STATE: DISPUTE_STATEMENT
     if (user.state === 'DISPUTE_STATEMENT') {
       const stateData = user.state_data || {};
-      const { contractId, myRole, otherPhone } = stateData;
+      const { contractId, myRole } = stateData;
 
       const { data: contract } = await supabase
         .from('contracts')
@@ -437,7 +617,6 @@ export async function POST(req: Request) {
 
       const statement = processedBody;
 
-      // Log this party's statement as an event
       await supabase.from('events').insert({
         contract_id: contractId,
         actor: myRole,
@@ -448,7 +627,6 @@ export async function POST(req: Request) {
       await sendWhatsAppMessage(phone, `✅ Your statement has been recorded. We are now waiting for the other party's response.`);
       await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
 
-      // Check if the OTHER party has already submitted their statement
       const otherRole = myRole === 'FREELANCER' ? 'CLIENT' : 'FREELANCER';
       const { data: otherStatement } = await supabase
         .from('events')
@@ -465,7 +643,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ success: true });
     }
 
-    // STATE: NEGOTIATE_PROPOSE — client entering settlement amount
+    // STATE: NEGOTIATE_PROPOSE
     if (user.state === 'NEGOTIATE_PROPOSE') {
       const stateData = user.state_data || {};
       const { data: contract } = await supabase
@@ -483,7 +661,7 @@ export async function POST(req: Request) {
       if (amountStr.endsWith('k')) amountStr = amountStr.slice(0, -1) + '000';
       const amount = parseInt(amountStr.replace(/[^0-9]/g, ''));
 
-      const minAmount = Math.ceil(contract.amount * 0.2); // Enforce 20% minimum
+      const minAmount = Math.ceil(contract.amount * 0.2);
 
       if (isNaN(amount) || amount <= 0) {
         await sendWhatsAppMessage(phone, `Please reply with a valid number (e.g. 15000).`);
@@ -525,16 +703,17 @@ export async function POST(req: Request) {
     }
 
     // =========================================================
-    // CONTRACT-BASED ROUTING
+    // FIX #4: CHECK PENDING AGREEMENT *BEFORE* falling to menu
+    // This must come before the active contract check and before
+    // the state machine, so that AGREE is never swallowed.
     // =========================================================
-
-    // --- CHECK PENDING AGREEMENT (Client is the recipient) ---
-    const { data: pendingContract } = await supabase
+    const { data: pendingContracts } = await supabase
       .from('contracts')
       .select('*')
       .eq('client_phone', phone)
-      .in('status', ['PENDING_AGREEMENT'])
-      .single();
+      .eq('status', 'PENDING_AGREEMENT');
+
+    const pendingContract = pendingContracts?.[0];
 
     if (pendingContract) {
       if (command === 'AGREE') {
@@ -546,16 +725,16 @@ export async function POST(req: Request) {
           if (!appUrl) throw new Error('NEXT_PUBLIC_APP_URL env variable is not set');
 
           const link: any = await razorpay.paymentLink.create({
-            amount: pendingContract.amount * 100, // paise
+            amount: pendingContract.amount * 100,
             currency: 'INR',
             description: `Arbiter Escrow — Contract #${pendingContract.id}`,
             customer: {
-              name: 'Client',
+              name: pendingContract.client_name || user.name || 'Client',
               contact: pendingContract.client_phone,
               email: 'client@arbiter.in'
             },
             notify: { sms: false, email: false },
-            callback_url: `${appUrl}/api/razorpay-webhook`,
+            callback_url: `${appUrl}api/razorpay-webhook`,
             callback_method: 'get',
             expire_by: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60
           });
@@ -602,12 +781,15 @@ export async function POST(req: Request) {
       } else if (command === 'MENU' || command === '1' || command === '2' || command === '3') {
         // Fall through to standard menu if requested
       } else {
+        // Remind client of pending contract
+        const { data: flUser } = await supabase.from('users').select('name').eq('phone', pendingContract.freelancer_phone).single();
         await sendWhatsAppMessage(
           phone,
           `📋 *CONTRACT #${pendingContract.id} is awaiting your decision.*\n\n` +
           `Work: ${pendingContract.description}\n` +
           `Amount: ₹${pendingContract.amount.toLocaleString('en-IN')}\n` +
-          `Revisions: ${pendingContract.revisions_allowed}\n\n` +
+          `Revisions: ${pendingContract.revisions_allowed}\n` +
+          `Freelancer: ${flUser?.name || 'Freelancer'} (+${pendingContract.freelancer_phone})\n\n` +
           `Reply *AGREE* to pay and start, or *EDIT* to request changes.`
         );
         return NextResponse.json({ success: true });
@@ -629,7 +811,6 @@ export async function POST(req: Request) {
 
       const content = mediaUrl ? `[Media]: ${mediaUrl}` : processedBody;
 
-      // --- DISPUTE COMMAND ---
       if (command === 'DISPUTE') {
         if (activeContract.status === 'DISPUTED') {
           await sendWhatsAppMessage(phone, `⚠️ A dispute is already in progress for contract *#${activeContract.id}*. Please wait for the ruling.`);
@@ -662,7 +843,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ success: true });
       }
 
-      // Log all other events
+      // Log events
       await supabase.from('events').insert({
         contract_id: activeContract.id,
         actor: role,
@@ -708,7 +889,6 @@ export async function POST(req: Request) {
           return NextResponse.json({ success: true });
         }
 
-        // Freelancer submits a file
         if (mediaUrl) {
           const lastSubmit = activeContract.last_submission_at ? new Date(activeContract.last_submission_at) : null;
           const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000);
@@ -733,7 +913,6 @@ export async function POST(req: Request) {
           await sendWhatsAppMessage(phone, `✅ Work submitted to the client for review.`);
 
         } else {
-          // Freelancer sends a text message — forward to client
           await sendWhatsAppMessage(activeContract.client_phone, `*Freelancer update:*\n${processedBody}`);
         }
 
@@ -819,7 +998,7 @@ export async function POST(req: Request) {
           await supabase.from('users').update({ state: 'CONTRACT_DESC', state_data: {} }).eq('phone', phone);
           await sendWhatsAppMessage(
             phone,
-            `📝 *New Contract — Step 1 of 4*\n\n` +
+            `📝 *New Contract — Step 1 of 5*\n\n` +
             `Describe the work, deliverables, and any specific requirements.\n\n` +
             `⚠️ *Be specific!* Your description is the ground truth in a dispute.\n\n` +
             `Example: _"Minimalist logo in blue/white, PNG + SVG files, 3 revision rounds"_`
@@ -905,7 +1084,7 @@ export async function POST(req: Request) {
         }
         stateData.desc = desc;
         await supabase.from('users').update({ state: 'CONTRACT_AMOUNT', state_data: stateData }).eq('phone', phone);
-        await sendWhatsAppMessage(phone, `📝 *New Contract — Step 2 of 4*\n\n💰 How much are you charging? (INR, numbers only)\n\nExamples: *8000*, *25000*, *1.5L*`);
+        await sendWhatsAppMessage(phone, `📝 *New Contract — Step 2 of 5*\n\n💰 How much are you charging? (INR, numbers only)\n\nExamples: *8000*, *25000*, *1.5L*`);
         break;
       }
 
@@ -923,7 +1102,7 @@ export async function POST(req: Request) {
         await supabase.from('users').update({ state: 'CONTRACT_REVISIONS', state_data: stateData }).eq('phone', phone);
         await sendWhatsAppMessage(
           phone,
-          `📝 *New Contract — Step 3 of 4*\n\n✅ Amount: ₹${amount.toLocaleString('en-IN')}\n\n🔄 How many revision rounds will you allow the client?\n\n(0 for no revisions, 3-5 is standard. Reply with a number.)`
+          `📝 *New Contract — Step 3 of 5*\n\n✅ Amount: ₹${amount.toLocaleString('en-IN')}\n\n🔄 How many revision rounds will you allow the client?\n\n(0 for no revisions, 3-5 is standard. Reply with a number.)`
         );
         break;
       }
@@ -935,10 +1114,27 @@ export async function POST(req: Request) {
           break;
         }
         stateData.revisions = revisions;
+        // FIX #2: Ask for client's name next
+        await supabase.from('users').update({ state: 'CONTRACT_CLIENT_NAME', state_data: stateData }).eq('phone', phone);
+        await sendWhatsAppMessage(
+          phone,
+          `📝 *New Contract — Step 4 of 5*\n\n✅ Revisions: ${revisions}\n\n👤 What is the client's name?`
+        );
+        break;
+      }
+
+      // FIX #2: New step — collect client name from freelancer
+      case 'CONTRACT_CLIENT_NAME': {
+        const clientName = processedBody;
+        if (!clientName || clientName.length < 2) {
+          await sendWhatsAppMessage(phone, `Please enter the client's name (at least 2 characters).`);
+          break;
+        }
+        stateData.clientName = clientName;
         await supabase.from('users').update({ state: 'CONTRACT_CLIENT_NO', state_data: stateData }).eq('phone', phone);
         await sendWhatsAppMessage(
           phone,
-          `📝 *New Contract — Step 4 of 4*\n\n✅ Revisions: ${revisions}\n\n📱 What is the client's 10-digit WhatsApp number?\n\n(No country code needed. Just 10 digits.)`
+          `📝 *New Contract — Step 5 of 5*\n\n✅ Client: ${clientName}\n\n📱 What is the client's 10-digit WhatsApp number?\n\n(No country code needed. Just 10 digits.)`
         );
         break;
       }
@@ -974,7 +1170,8 @@ export async function POST(req: Request) {
 
         const contractId = `ARB-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
 
-        await supabase.from('contracts').insert({
+        // FIX #2: Store client_name in the contract
+        const insertData: any = {
           id: contractId,
           freelancer_phone: phone,
           client_phone: clientPhone,
@@ -983,26 +1180,31 @@ export async function POST(req: Request) {
           revisions_allowed: stateData.revisions,
           freelancer_agreed: true,
           status: 'PENDING_AGREEMENT'
-        });
+        };
+
+        // Add client_name if column exists (gracefully handle if not)
+        if (stateData.clientName) {
+          insertData.client_name = stateData.clientName;
+        }
+
+        const { error: insertErr } = await supabase.from('contracts').insert(insertData);
+
+        // If client_name column doesn't exist, retry without it
+        if (insertErr && insertErr.message?.includes('client_name')) {
+          delete insertData.client_name;
+          await supabase.from('contracts').insert(insertData);
+        }
 
         await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
 
-        const contractCard =
-          `📋 *ARB CONTRACT #${contractId}*\n` +
-          `─────────────────────────\n` +
-          `*Work:* ${stateData.desc}\n` +
-          `*Revisions:* ${stateData.revisions}\n` +
-          `*Payment:* ₹${stateData.amount.toLocaleString('en-IN')} (held in escrow until you approve)\n` +
-          `*Freelancer:* ${user.name || 'Your Freelancer'}\n` +
-          `─────────────────────────\n` +
-          `This contract is binding once payment is made.\n\n` +
-          `Reply *AGREE* to pay and start, or *EDIT* to request changes.`;
+        // FIX #2: Show freelancer name + phone in contract card
+        const contract = { ...insertData, client_name: stateData.clientName || 'Client' };
+        await sendContractCardToClient(contract, user.name || 'Freelancer');
 
         await sendWhatsAppMessage(
           phone,
-          `✅ Contract *#${contractId}* created! It has been sent to +${clientPhone} for approval.\n\nYou'll be notified once they agree and fund the escrow.`
+          `✅ Contract *#${contractId}* created! It has been sent to ${stateData.clientName || 'the client'} (+${clientPhone}) for approval.\n\nYou'll be notified once they agree and fund the escrow.`
         );
-        await sendWhatsAppMessage(clientPhone, contractCard);
         break;
       }
 

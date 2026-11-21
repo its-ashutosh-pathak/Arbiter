@@ -16,6 +16,7 @@ CREATE TABLE contracts (
   id TEXT PRIMARY KEY,
   freelancer_phone TEXT REFERENCES users(phone),
   client_phone TEXT,
+  client_name TEXT,
   description TEXT,
   amount INTEGER,
   revisions_allowed INTEGER,
