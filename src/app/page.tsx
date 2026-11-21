@@ -1,8 +1,8 @@
 import Image from "next/image";
 
 export default function Home() {
-  const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER?.replace("whatsapp:", "") ?? "+17372508034";
-  const sandboxJoinMsg = "join twilio-trial";
+  // Your personal WhatsApp number connected via Green API
+  const botPhone = "919871852159";
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 font-sans text-white">
@@ -48,19 +48,19 @@ export default function Home() {
           <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 text-left">
             <h3 className="font-bold text-lg mb-3">🚀 Try it on WhatsApp</h3>
             <p className="text-zinc-400 text-sm mb-4">
-              Join the Twilio Sandbox, then text the bot to get started.
+              Send <span className="font-mono bg-zinc-800 px-1.5 py-0.5 rounded text-emerald-400">#arbiter</span> to the bot to get started.
             </p>
             <ol className="text-sm text-zinc-300 space-y-2 list-decimal list-inside mb-4">
               <li>
-                Save <span className="font-mono bg-zinc-800 px-1.5 py-0.5 rounded text-emerald-400">{twilioNumber}</span> in your contacts
+                Save <span className="font-mono bg-zinc-800 px-1.5 py-0.5 rounded text-emerald-400">+{botPhone.replace(/^91/, '91 ')}</span> in your contacts
               </li>
               <li>
-                Send the message: <span className="font-mono bg-zinc-800 px-1.5 py-0.5 rounded text-emerald-400">{sandboxJoinMsg}</span>
+                Send <span className="font-mono bg-zinc-800 px-1.5 py-0.5 rounded text-emerald-400">#arbiter</span> to start the bot
               </li>
-              <li>You&apos;re in! Text anything to get started.</li>
+              <li>Follow the onboarding prompts — you&apos;re live!</li>
             </ol>
             <a
-              href={`https://wa.me/${twilioNumber.replace("+", "")}?text=${encodeURIComponent(sandboxJoinMsg)}`}
+              href={`https://wa.me/${botPhone}?text=${encodeURIComponent('#arbiter')}`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-black font-semibold px-5 py-2.5 rounded-xl transition-colors text-sm"
@@ -74,7 +74,7 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="border-t border-zinc-800 px-8 py-4 text-center text-xs text-zinc-600">
-        <p>Built for Razorpay Buildathon · Sept 2026 · Powered by Twilio, Razorpay, Supabase, Gemini</p>
+        <p>Built for Razorpay Buildathon · Nov 2026 · Powered by Green API, Razorpay, Supabase, Gemini</p>
         <p className="mt-2">
           Designed & Developed By <a href="https://itsashutoshpathak.vercel.app/" target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:underline">Ashutosh Pathak</a>
         </p>
