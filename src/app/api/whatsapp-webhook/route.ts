@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { sendWhatsAppMessage } from '@/lib/twilio';
+import { sendWhatsAppMessage } from '@/lib/greenApi';
 import { adjudicateDispute } from '@/lib/judge';
-import { uploadTwilioMediaToSupabase } from '@/lib/storage';
 
 // =========================================================
 // HELPER: Execute Payout to Freelancer
@@ -96,7 +95,7 @@ async function handleApproval(contract: any) {
     await supabase.from('contracts').update({ status: 'PAYOUT_PENDING' }).eq('id', contract.id);
     await sendWhatsAppMessage(
       contract.freelancer_phone,
-      `⚠️ Work approved, but payout failed. Please check your UPI ID by typing *EDIT UPI* and we will retry.`
+      `⚠️ Work approved, but payout failed. Please check your UPI ID by typing *#arbiter EDIT UPI* and we will retry.`
     );
     await sendWhatsAppMessage(
       contract.client_phone,
@@ -194,22 +193,95 @@ async function runDisputeAndNotify(contract: any) {
 }
 
 // =========================================================
-// MAIN WEBHOOK HANDLER
+// MAIN WEBHOOK HANDLER (Green API + Twilio compatible)
 // =========================================================
 export async function POST(req: Request) {
   try {
-    const text = await req.text();
-    const params = new URLSearchParams(text);
+    const rawBody = await req.text();
+    let phone = '';
+    let body = '';
+    let messageSid = '';
+    let mediaUrl: string | null = null;
 
-    const from = params.get('From') || '';
-    const body = params.get('Body') || '';
-    const messageSid = params.get('MessageSid');
-    const mediaUrl = params.get('MediaUrl0');
+    // Check if JSON (Green API webhook format)
+    if (rawBody.trim().startsWith('{')) {
+      const data = JSON.parse(rawBody);
+      const typeWebhook = data.typeWebhook;
 
-    const phone = from.replace('whatsapp:', '');
-    if (!phone) return NextResponse.json({ error: 'Missing From' }, { status: 400 });
+      // Only handle incoming messages
+      if (typeWebhook !== 'incomingMessageReceived') {
+        return NextResponse.json({ success: true, ignored: true });
+      }
 
-    // --- IDEMPOTENCY: Skip duplicate Twilio deliveries ---
+      const senderData = data.senderData || {};
+      const messageData = data.messageData || {};
+
+      // sender e.g. "919876543210@c.us"
+      const sender = senderData.chatId || senderData.sender || '';
+      phone = sender.replace('@c.us', '').replace('whatsapp:', '');
+      messageSid = data.idMessage || '';
+
+      if (messageData.typeMessage === 'textMessage') {
+        body = messageData.textMessageData?.textMessage || '';
+      } else if (messageData.typeMessage === 'extendedTextMessage') {
+        body = messageData.extendedTextMessageData?.text || '';
+      } else if (messageData.typeMessage === 'fileMessage') {
+        body = messageData.fileMessageData?.caption || '';
+        mediaUrl = messageData.fileMessageData?.downloadUrl || null;
+      }
+    } else {
+      // Fallback for form-encoded (Twilio format)
+      const params = new URLSearchParams(rawBody);
+      const from = params.get('From') || '';
+      body = params.get('Body') || '';
+      messageSid = params.get('MessageSid') || '';
+      mediaUrl = params.get('MediaUrl0');
+      phone = from.replace('whatsapp:', '').replace(/\D/g, '');
+    }
+
+    if (!phone) return NextResponse.json({ error: 'Missing phone/sender' }, { status: 400 });
+
+    // =========================================================
+    // #ARBITER TRIGGER FILTER
+    // Check if user is already in an ongoing multi-step flow or contract,
+    // OR if message starts with or contains #arbiter
+    // =========================================================
+    const cleanBody = body.trim();
+    const hasTrigger = cleanBody.toLowerCase().includes('#arbiter');
+
+    // Check if user exists in database
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('phone', phone)
+      .single();
+
+    const isOngoingFlow = user && user.state && user.state !== 'IDLE';
+
+    // Check if there is an active pending or in-progress contract involving this phone
+    const { data: hasActiveContract } = await supabase
+      .from('contracts')
+      .select('id')
+      .or(`freelancer_phone.eq.${phone},client_phone.eq.${phone}`)
+      .in('status', ['PENDING_AGREEMENT', 'IN_PROGRESS', 'DISPUTED'])
+      .limit(1);
+
+    const isInActiveContract = hasActiveContract && hasActiveContract.length > 0;
+
+    // IF not in active interaction AND message does NOT contain #arbiter, SILENTLY IGNORE
+    // (Protects personal messages from friends/family!)
+    if (!hasTrigger && !isOngoingFlow && !isInActiveContract) {
+      console.log(`[IGNORE] Personal message without #arbiter trigger from ${phone}`);
+      return NextResponse.json({ success: true, ignored: true });
+    }
+
+    // Strip #arbiter trigger word from the command if present
+    let processedBody = cleanBody.replace(/#arbiter/gi, '').trim();
+    if (!processedBody && hasTrigger) {
+      processedBody = 'MENU'; // Typing just "#arbiter" opens menu
+    }
+
+    // --- IDEMPOTENCY: Skip duplicate deliveries ---
     if (messageSid) {
       const { data: existingMsg } = await supabase
         .from('processed_messages')
@@ -225,15 +297,7 @@ export async function POST(req: Request) {
       await supabase.from('processed_messages').insert({ message_sid: messageSid });
     }
 
-    // --- FETCH USER ---
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('phone', phone)
-      .single();
-
     // --- ONBOARDING: NEW USER ---
-    // Supabase returns code PGRST116 when no row is found — that is a new user, not a real error
     const isNewUser = !user && (userError as any)?.code === 'PGRST116';
     if (isNewUser) {
       await supabase.from('users').insert({ phone, state: 'SETUP_NAME' });
@@ -249,14 +313,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'User fetch failed' }, { status: 500 });
     }
 
-    const command = body.trim().toUpperCase();
+    const command = processedBody.toUpperCase();
 
     // =========================================================
     // GLOBAL COMMANDS (always available regardless of state)
     // =========================================================
     if (command === 'RESET') {
       await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
-      await sendWhatsAppMessage(phone, `🔄 Your session has been reset. Type *MENU* to see your options.`);
+      await sendWhatsAppMessage(phone, `🔄 Your session has been reset. Type *#arbiter MENU* to see your options.`);
       return NextResponse.json({ success: true });
     }
 
@@ -272,7 +336,6 @@ export async function POST(req: Request) {
 
     // =========================================================
     // MULTI-STEP STATE FLOWS
-    // These states require collecting a follow-up message before proceeding
     // =========================================================
 
     // STATE: AWAITING_FEEDBACK — client describing revision changes
@@ -290,12 +353,12 @@ export async function POST(req: Request) {
         return NextResponse.json({ success: true });
       }
 
-      if (body.trim().length < 10) {
+      if (processedBody.length < 10) {
         await sendWhatsAppMessage(phone, `Please describe the changes in at least 10 characters so the freelancer can understand what to fix.`);
         return NextResponse.json({ success: true });
       }
 
-      const feedback = body.trim();
+      const feedback = processedBody;
       const revisionsUsed = contract.client_revision_count + 1;
       const revisionsLeft = contract.revisions_allowed - revisionsUsed;
 
@@ -343,7 +406,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ success: true });
       }
 
-      const editText = body.trim();
+      const editText = processedBody;
       await sendWhatsAppMessage(
         contract.freelancer_phone,
         `📝 *CONTRACT EDIT REQUEST — #${contract.id}*\n` +
@@ -372,7 +435,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ success: true });
       }
 
-      const statement = body.trim();
+      const statement = processedBody;
 
       // Log this party's statement as an event
       await supabase.from('events').insert({
@@ -396,7 +459,6 @@ export async function POST(req: Request) {
         .single();
 
       if (otherStatement) {
-        // Both statements received — run AI judge
         await runDisputeAndNotify(contract);
       }
 
@@ -417,7 +479,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ success: true });
       }
 
-      let amountStr = body.trim().toLowerCase().replace(/,/g, '');
+      let amountStr = processedBody.toLowerCase().replace(/,/g, '');
       if (amountStr.endsWith('k')) amountStr = amountStr.slice(0, -1) + '000';
       const amount = parseInt(amountStr.replace(/[^0-9]/g, ''));
 
@@ -432,15 +494,12 @@ export async function POST(req: Request) {
         return NextResponse.json({ success: true });
       }
       if (amount >= contract.amount) {
-        // Offering full amount = just approve
         await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
         await handleApproval(contract);
         return NextResponse.json({ success: true });
       }
 
       await supabase.from('users').update({ state: 'IDLE', state_data: null }).eq('phone', phone);
-
-      // Store negotiation amount on the contract for the freelancer's ACCEPT to reference
       await supabase.from('contracts').update({ active_negotiation_amount: amount }).eq('id', contract.id);
 
       await supabase.from('events').insert({
@@ -498,7 +557,7 @@ export async function POST(req: Request) {
             notify: { sms: false, email: false },
             callback_url: `${appUrl}/api/razorpay-webhook`,
             callback_method: 'get',
-            expire_by: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60 // 30 days
+            expire_by: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60
           });
 
           await supabase
@@ -533,7 +592,6 @@ export async function POST(req: Request) {
         }
 
       } else if (command === 'EDIT') {
-        // Collect the client's edit request on their next message
         await supabase.from('users').update({
           state: 'AWAITING_CONTRACT_EDIT',
           state_data: { contractId: pendingContract.id }
@@ -541,8 +599,9 @@ export async function POST(req: Request) {
         await sendWhatsAppMessage(phone, `📝 What changes would you like to request from the freelancer?`);
         return NextResponse.json({ success: true });
 
+      } else if (command === 'MENU' || command === '1' || command === '2' || command === '3') {
+        // Fall through to standard menu if requested
       } else {
-        // Any other message — remind them of their choices
         await sendWhatsAppMessage(
           phone,
           `📋 *CONTRACT #${pendingContract.id} is awaiting your decision.*\n\n` +
@@ -568,17 +627,10 @@ export async function POST(req: Request) {
       const isFreelancer = activeContract.freelancer_phone === phone;
       const role = isFreelancer ? 'FREELANCER' : 'CLIENT';
 
-      // Upload Twilio media to permanent Supabase storage
-      let finalMediaUrl = mediaUrl;
-      if (mediaUrl) {
-        finalMediaUrl = await uploadTwilioMediaToSupabase(mediaUrl, activeContract.id) || mediaUrl;
-      }
-
-      const content = finalMediaUrl ? `[Media]: ${finalMediaUrl}` : body.trim();
+      const content = mediaUrl ? `[Media]: ${mediaUrl}` : processedBody;
 
       // --- DISPUTE COMMAND ---
       if (command === 'DISPUTE') {
-        // Guard: prevent dispute on already-disputed or complete contracts
         if (activeContract.status === 'DISPUTED') {
           await sendWhatsAppMessage(phone, `⚠️ A dispute is already in progress for contract *#${activeContract.id}*. Please wait for the ruling.`);
           return NextResponse.json({ success: true });
@@ -587,10 +639,8 @@ export async function POST(req: Request) {
         const otherPhone = isFreelancer ? activeContract.client_phone : activeContract.freelancer_phone;
         const otherRole = isFreelancer ? 'CLIENT' : 'FREELANCER';
 
-        // Move contract to DISPUTED
         await supabase.from('contracts').update({ status: 'DISPUTED' }).eq('id', activeContract.id);
 
-        // Set BOTH parties to collect their statements
         await supabase.from('users').update({
           state: 'DISPUTE_STATEMENT',
           state_data: { contractId: activeContract.id, myRole: role, otherPhone }
@@ -616,14 +666,13 @@ export async function POST(req: Request) {
       await supabase.from('events').insert({
         contract_id: activeContract.id,
         actor: role,
-        type: finalMediaUrl ? 'revision_submitted' : 'MESSAGE',
+        type: mediaUrl ? 'revision_submitted' : 'MESSAGE',
         content
       });
 
       // === FREELANCER BRANCH ===
       if (isFreelancer) {
 
-        // ACCEPT settlement offer
         if (command === 'ACCEPT') {
           const settlementAmount = activeContract.active_negotiation_amount;
           if (!settlementAmount) {
@@ -640,7 +689,6 @@ export async function POST(req: Request) {
           return NextResponse.json({ success: true });
         }
 
-        // REJECT settlement → escalate to DISPUTE
         if (command === 'REJECT') {
           await supabase.from('events').insert({
             contract_id: activeContract.id,
@@ -648,7 +696,6 @@ export async function POST(req: Request) {
             type: 'negotiate_rejected',
             content: 'Freelancer rejected the settlement offer'
           });
-          // Auto-trigger dispute without new statements (evidence log is sufficient)
           await supabase.from('contracts').update({ status: 'DISPUTED' }).eq('id', activeContract.id);
           await sendWhatsAppMessage(activeContract.freelancer_phone, `❌ Settlement rejected. Escalating to AI Judge...`);
           await sendWhatsAppMessage(activeContract.client_phone, `❌ The freelancer rejected your settlement. Escalating to AI Judge...`);
@@ -656,15 +703,13 @@ export async function POST(req: Request) {
           return NextResponse.json({ success: true });
         }
 
-        // Sequential lock: client must respond before freelancer can resubmit
         if (activeContract.submission_status === 'AWAITING_CLIENT_REVIEW') {
           await sendWhatsAppMessage(phone, `⏳ Waiting for the client to review your last submission. You can't submit again until they respond.`);
           return NextResponse.json({ success: true });
         }
 
         // Freelancer submits a file
-        if (finalMediaUrl) {
-          // Rapid submission warning (< 10 minutes since last submission)
+        if (mediaUrl) {
           const lastSubmit = activeContract.last_submission_at ? new Date(activeContract.last_submission_at) : null;
           const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000);
           const isRapid = lastSubmit && lastSubmit > tenMinsAgo;
@@ -682,26 +727,24 @@ export async function POST(req: Request) {
           await sendWhatsAppMessage(
             activeContract.client_phone,
             `${warningBanner}📨 *CONTRACT #${activeContract.id} — ${revisionNote}*\n\n` +
-            `The freelancer submitted work:\n${finalMediaUrl}\n\n` +
+            `The freelancer submitted work:\n${mediaUrl}\n\n` +
             `Reply:\n✅ APPROVE — release ₹${activeContract.amount.toLocaleString('en-IN')}\n🔄 REVISION — request changes\n⚖️ DISPUTE — AI Judge`
           );
           await sendWhatsAppMessage(phone, `✅ Work submitted to the client for review.`);
 
         } else {
           // Freelancer sends a text message — forward to client
-          await sendWhatsAppMessage(activeContract.client_phone, `*Freelancer update:*\n${body.trim()}`);
+          await sendWhatsAppMessage(activeContract.client_phone, `*Freelancer update:*\n${processedBody}`);
         }
 
       // === CLIENT BRANCH ===
       } else {
 
         if (command === 'APPROVE') {
-          // Guard: no work submitted yet
           if (activeContract.submission_status !== 'AWAITING_CLIENT_REVIEW') {
             await sendWhatsAppMessage(phone, `⏳ The freelancer hasn't submitted any work yet. You can only approve after they send files.`);
             return NextResponse.json({ success: true });
           }
-          // Guard: already complete (double approval)
           if (activeContract.status === 'COMPLETED') {
             await sendWhatsAppMessage(phone, `This contract is already complete.`);
             return NextResponse.json({ success: true });
@@ -709,12 +752,10 @@ export async function POST(req: Request) {
           await handleApproval(activeContract);
 
         } else if (command === 'REVISION') {
-          // Guard: no work submitted yet
           if (activeContract.submission_status !== 'AWAITING_CLIENT_REVIEW') {
             await sendWhatsAppMessage(phone, `⏳ The freelancer hasn't submitted any work yet.`);
             return NextResponse.json({ success: true });
           }
-          // Guard: revisions exhausted
           if (activeContract.client_revision_count >= activeContract.revisions_allowed) {
             await sendWhatsAppMessage(
               phone,
@@ -726,7 +767,6 @@ export async function POST(req: Request) {
               `⚖️ DISPUTE — Let the AI Judge decide`
             );
           } else {
-            // Collect feedback on the NEXT message
             await supabase.from('users').update({
               state: 'AWAITING_FEEDBACK',
               state_data: { contractId: activeContract.id }
@@ -734,8 +774,8 @@ export async function POST(req: Request) {
             const revisionsLeft = activeContract.revisions_allowed - activeContract.client_revision_count - 1;
             await sendWhatsAppMessage(
               phone,
-              `🔄 Describe the changes needed (${activeContract.client_revision_count + 1} of ${activeContract.revisions_allowed} revisions, *${revisionsLeft} left after this*):`)
-            ;
+              `🔄 Describe the changes needed (${activeContract.client_revision_count + 1} of ${activeContract.revisions_allowed} revisions, *${revisionsLeft} left after this*):`
+            );
           }
 
         } else if (command === 'NEGOTIATE') {
@@ -749,8 +789,7 @@ export async function POST(req: Request) {
           );
 
         } else {
-          // Forward client text to freelancer
-          await sendWhatsAppMessage(activeContract.freelancer_phone, `*Client update:*\n${body.trim()}`);
+          await sendWhatsAppMessage(activeContract.freelancer_phone, `*Client update:*\n${processedBody}`);
         }
       }
 
@@ -823,7 +862,7 @@ export async function POST(req: Request) {
       }
 
       case 'SETUP_NAME': {
-        const name = body.trim();
+        const name = processedBody;
         if (!name || name.length < 2) {
           await sendWhatsAppMessage(phone, `Please enter your full name.`);
           break;
@@ -837,7 +876,7 @@ export async function POST(req: Request) {
       }
 
       case 'SETUP_UPI': {
-        const upiId = body.trim();
+        const upiId = processedBody;
         if (!/^\S+@\S+$/.test(upiId)) {
           await sendWhatsAppMessage(
             phone,
@@ -854,7 +893,7 @@ export async function POST(req: Request) {
       }
 
       case 'CONTRACT_DESC': {
-        const desc = body.trim();
+        const desc = processedBody;
         if (desc.length < 20) {
           await sendWhatsAppMessage(
             phone,
@@ -871,8 +910,7 @@ export async function POST(req: Request) {
       }
 
       case 'CONTRACT_AMOUNT': {
-        // Parse Indian formats: "8k" → 8000, "1.5L" → 150000, "1,50,000" → 150000
-        let amountStr = body.trim().toLowerCase().replace(/,/g, '');
+        let amountStr = processedBody.toLowerCase().replace(/,/g, '');
         if (amountStr.endsWith('k')) amountStr = (parseFloat(amountStr) * 1000).toString();
         else if (amountStr.endsWith('l')) amountStr = (parseFloat(amountStr) * 100000).toString();
         const amount = parseInt(amountStr.replace(/[^0-9]/g, ''));
@@ -891,7 +929,7 @@ export async function POST(req: Request) {
       }
 
       case 'CONTRACT_REVISIONS': {
-        const revisions = parseInt(body.replace(/[^0-9]/g, ''));
+        const revisions = parseInt(processedBody.replace(/[^0-9]/g, ''));
         if (isNaN(revisions) || revisions < 0 || revisions > 20) {
           await sendWhatsAppMessage(phone, `Please reply with a number between 0 and 20.`);
           break;
@@ -906,7 +944,7 @@ export async function POST(req: Request) {
       }
 
       case 'CONTRACT_CLIENT_NO': {
-        const rawPhone = body.replace(/[^0-9]/g, '');
+        const rawPhone = processedBody.replace(/[^0-9]/g, '');
         let clientPhone = rawPhone;
         if (rawPhone.length === 10) clientPhone = `91${rawPhone}`;
         else if (rawPhone.startsWith('91') && rawPhone.length === 12) clientPhone = rawPhone;
@@ -916,14 +954,12 @@ export async function POST(req: Request) {
           break;
         }
 
-        // Prevent self-contracting
         const cleanMyPhone = phone.replace(/\D/g, '');
         if (clientPhone === cleanMyPhone || `91${clientPhone}` === cleanMyPhone || clientPhone === `91${cleanMyPhone}`) {
           await sendWhatsAppMessage(phone, `❌ You can't create a contract with yourself.`);
           break;
         }
 
-        // Rate limit: max 5 active contracts per phone
         const { count } = await supabase
           .from('contracts')
           .select('id', { count: 'exact', head: true })
@@ -936,7 +972,6 @@ export async function POST(req: Request) {
           break;
         }
 
-        // Generate unique contract ID with very low collision probability
         const contractId = `ARB-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
 
         await supabase.from('contracts').insert({
