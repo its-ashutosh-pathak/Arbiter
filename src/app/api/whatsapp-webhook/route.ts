@@ -1001,7 +1001,7 @@ export async function POST(req: Request) {
             `📝 *New Contract — Step 1 of 5*\n\n` +
             `Describe the work, deliverables, and any specific requirements.\n\n` +
             `⚠️ *Be specific!* Your description is the ground truth in a dispute.\n\n` +
-            `Example: _"Minimalist logo in blue/white, PNG + SVG files, 3 revision rounds"_`
+            `Example: _"Minimalist logo in blue/white, PNG + SVG files"_`
           );
         } else if (command === '2') {
           const { data: myContracts } = await supabase
@@ -1077,7 +1077,7 @@ export async function POST(req: Request) {
           await sendWhatsAppMessage(
             phone,
             `⚠️ *Too vague!* A specific description protects you in a dispute.\n\n` +
-            `Example: _"5-page mobile-responsive website in Figma + HTML/CSS export, 3 revision rounds"_\n\n` +
+            `Example: _"5-page mobile-responsive website in Figma + HTML/CSS export"_\n\n` +
             `Please send a more detailed description (at least 20 characters).`
           );
           break;
