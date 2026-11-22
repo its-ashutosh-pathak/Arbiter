@@ -7,11 +7,25 @@
 
 ---
 
-## 🚨 The Problem
+## 🚨 Background & Market Context
 
-India has over 15M+ gig workers and freelancers. Currently, when a freelancer delivers work and the client ghosts them, they have **zero recourse**.
-* Existing escrow platforms are complex, require paperwork, and cost too much.
-* Simple payment tools (Razorpay Links, UPI) offer no contract layer or dispute resolution.
+### Freelancer Payment Insecurity in India: Market Size & Financial Impact
+
+India's gig economy is rapidly expanding, with approximately **1.2 crore gig workers in FY2024–25**, projected to reach **2.35 crore by FY2029–30**, according to government estimates. However, within this ecosystem, independent digital freelancers—including graphic designers, logo designers, web developers, app developers, video editors, content writers, and UI/UX designers—face a major financial risk: clients failing to pay for completed work.
+
+* **50%–60% Incident Rate:** Various surveys have indicated that approximately **50–60% of freelancers have experienced payment-related issues or non-payment at least once**, although these figures vary by population and methodology. India currently lacks a reliable nationwide dataset measuring the total value of freelance work permanently unpaid.
+* **Economic Impact:** For an illustrative market estimate, India's digital/project-based freelance workforce can be assumed to be approximately **2–5 million individuals**. Assuming 40–60% experience payment problems and affected freelancers permanently lose an average of ₹5,000–₹20,000 annually, the estimated financial losses range from **₹400 crore to ₹6,000 crore per year**.
+* **Midpoint Scenario:** A baseline scenario of 3 million freelancers, a 50% incidence rate, and a ₹10,000 average annual loss suggests approximately **₹1,500 crore in annual losses**.
+
+| Scenario | Freelancer Population | Incidence Rate | Avg Annual Loss | Estimated Annual Economic Loss |
+| :--- | :--- | :--- | :--- | :--- |
+| **Conservative** | 2.0 Million (20 Lakh) | 40% (800,000) | ₹5,000 / freelancer | **₹400 Crore** |
+| **Midpoint Baseline** | 3.0 Million (30 Lakh) | 50% (1,500,000) | ₹10,000 / freelancer | **₹1,500 Crore** |
+| **Upper Risk** | 5.0 Million (50 Lakh) | 60% (3,000,000) | ₹20,000 / freelancer | **₹6,000 Crore** |
+
+> **Key Takeaway:** India's freelance ecosystem is growing rapidly, but payment insecurity remains a massive hurdle. Even under conservative assumptions, unpaid freelance work accounts for hundreds to thousands of crores in potential annual economic losses. Existing commercial escrow services levy 10%–20% cuts with foreign currency barriers, while standard payment links offer zero milestone dispute protection.
+
+---
 
 ## 💡 The Solution
 
@@ -345,14 +359,6 @@ Add all environment variables in Vercel Dashboard → Settings → Environment V
 | `REJECT` | Freelancer | Reject settlement → AI Judge |
 | `EDIT UPI` | Anyone | Update your UPI ID |
 | `RESET` | Anyone | Reset session to main menu |
-
----
-
-## 👨‍💻 Author
-
-**Ashutosh Pathak**
-- Portfolio: [itsashutoshpathak.vercel.app](https://itsashutoshpathak.vercel.app/)
-- GitHub: [its-ashutosh-pathak](https://github.com/its-ashutosh-pathak)
 
 ---
 
